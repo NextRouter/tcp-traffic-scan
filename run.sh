@@ -12,7 +12,7 @@ for arg in "$@"; do
 done
 
 # Change to the project directory
-cd rtt-traffic-scan
+cd tcp-traffic-scan
 
 # Run the application
 cargo run -- "${CONVERTED_ARGS[@]}"
