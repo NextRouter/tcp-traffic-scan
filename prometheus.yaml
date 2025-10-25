@@ -1,0 +1,12 @@
+# Prometheusの設定例
+
+global:
+  scrape_interval: 1s
+  evaluation_interval: 1s
+
+scrape_configs:
+  # ローカルパケットダンプ監視
+  - job_name: "tcp-traffic-scan"
+    scrape_interval: 1s
+    static_configs:
+      - targets: ["localhost:59121"]
