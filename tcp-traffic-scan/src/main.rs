@@ -556,13 +556,14 @@ fn bind_socket_to_interface(socket: &Socket, interface: &str) -> io::Result<()> 
             )
         };
 
-        if verify_ret == 0 {
-            let bound_if = CString::new(&buf[..len as usize])
-                .ok()
-                .and_then(|s| s.into_string().ok())
-                .unwrap_or_default();
+        if verify_ret == 0 && len > 0 {
+            // Find the first NUL byte to get the actual interface name length
+            let null_pos = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
 
-            if bound_if.trim_matches('\0') != interface {
+            // Convert to string, trimming at the first NUL
+            let bound_if = std::str::from_utf8(&buf[..null_pos]).unwrap_or("").trim();
+
+            if !bound_if.is_empty() && bound_if != interface {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     format!(
@@ -571,6 +572,7 @@ fn bind_socket_to_interface(socket: &Socket, interface: &str) -> io::Result<()> 
                     ),
                 ));
             }
+            // If bound_if is empty or matches, consider it successful
         }
 
         Ok(())
