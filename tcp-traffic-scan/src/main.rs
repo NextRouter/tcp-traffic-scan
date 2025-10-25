@@ -1,5 +1,8 @@
+use axum::{extract::Query, http::StatusCode, response::IntoResponse, routing::get, Router};
 use clap::Parser;
+use lazy_static::lazy_static;
 use libc;
+use prometheus::{Encoder, GaugeVec, Opts, Registry, TextEncoder};
 use socket2::{Domain, Socket, Type};
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
@@ -11,9 +14,116 @@ use std::os::unix::io::AsRawFd;
 use std::sync::Once;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::time::{Duration, Instant};
+use tokio::runtime::Runtime;
+
+lazy_static! {
+    static ref REGISTRY: Registry = Registry::new();
+    static ref BANDWIDTH_GAUGE: GaugeVec = {
+        let opts = Opts::new("tcp_bandwidth_mbps", "TCP bandwidth estimation in Mbps")
+            .namespace("tcp_traffic_scan");
+        let gauge = GaugeVec::new(opts, &["interface", "server_ip"]).unwrap();
+        REGISTRY.register(Box::new(gauge.clone())).unwrap();
+        gauge
+    };
+    static ref CORRECTION_FACTOR: Arc<Mutex<f64>> = Arc::new(Mutex::new(1.0));
+}
+
+#[derive(serde::Deserialize)]
+struct CorrectionQuery {
+    value: Option<f64>,
+}
+
+// Prometheus metrics server on port 59121
+async fn start_metrics_server(running: Arc<AtomicBool>) {
+    let app = Router::new().route("/metrics", get(metrics_handler));
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:59121")
+        .await
+        .unwrap();
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            while running.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+}
+
+async fn metrics_handler() -> impl IntoResponse {
+    let mut buffer = Vec::new();
+    let encoder = TextEncoder::new();
+
+    // Get correction factor
+    let correction = *CORRECTION_FACTOR.lock().unwrap();
+
+    // Gather metrics
+    let metric_families = REGISTRY.gather();
+
+    // Apply correction factor to all gauge values
+    let corrected_families: Vec<_> = metric_families
+        .iter()
+        .map(|mf| {
+            let mut corrected_mf = mf.clone();
+            for metric in corrected_mf.mut_metric() {
+                if metric.has_gauge() {
+                    let original_value = metric.get_gauge().get_value();
+                    metric.mut_gauge().set_value(original_value * correction);
+                }
+            }
+            corrected_mf
+        })
+        .collect();
+
+    encoder.encode(&corrected_families, &mut buffer).unwrap();
+
+    (StatusCode::OK, buffer)
+}
+
+// HTTP correction server on port 32600
+async fn start_correction_server(running: Arc<AtomicBool>) {
+    let app = Router::new().route("/tcpflow", get(correction_handler));
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:32600")
+        .await
+        .unwrap();
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            while running.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+}
+
+async fn correction_handler(Query(params): Query<CorrectionQuery>) -> impl IntoResponse {
+    if let Some(value) = params.value {
+        if value > 0.0 {
+            *CORRECTION_FACTOR.lock().unwrap() = value;
+            (
+                StatusCode::OK,
+                format!("Correction factor set to: {}\n", value),
+            )
+        } else {
+            (
+                StatusCode::BAD_REQUEST,
+                "Value must be greater than 0\n".to_string(),
+            )
+        }
+    } else {
+        let current = *CORRECTION_FACTOR.lock().unwrap();
+        (
+            StatusCode::OK,
+            format!("Current correction factor: {}\n", current),
+        )
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -49,11 +159,33 @@ fn main() {
         });
     }
 
+    // Create tokio runtime for async servers
+    let rt = Runtime::new().unwrap();
+
+    // Start Prometheus metrics server (port 59121)
+    {
+        let running = running.clone();
+        rt.spawn(async move {
+            start_metrics_server(running).await;
+        });
+    }
+
+    // Start HTTP correction server (port 32600)
+    {
+        let running = running.clone();
+        rt.spawn(async move {
+            start_correction_server(running).await;
+        });
+    }
+
+    println!("Prometheus metrics available at http://localhost:59121/metrics");
+    println!("Correction factor API available at http://localhost:32600/tcpflow?value=<factor>");
+    println!("Starting measurements...");
+    println!("==================================");
+
     // Main loop until Ctrl+C
     let sleep_duration = Duration::from_secs_f64(1.0);
     while running.load(Ordering::SeqCst) {
-        println!("==================================");
-
         for interface in &args.interface {
             let mut results = Vec::new();
 
@@ -67,6 +199,12 @@ fn main() {
                                 0.0
                             };
                             let throughput_mbps = throughput_bps / 1_000_000.0;
+
+                            // Update Prometheus metric
+                            BANDWIDTH_GAUGE
+                                .with_label_values(&[interface, &server_addr.ip().to_string()])
+                                .set(throughput_mbps);
+
                             results.push(format!(
                                 "{}:{:.0}Mbps",
                                 server_addr.ip(),
@@ -112,6 +250,8 @@ fn main() {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
+
+    println!("\nShutting down...");
 }
 
 fn resolve_server_address(server_str: &str) -> io::Result<SocketAddr> {
