@@ -16,4 +16,5 @@ cd tcp-traffic-scan
 
 # Run the application
 cargo build
-./target/debug/tcp-traffic-scan -- "${CONVERTED_ARGS[@]}"
+
+sudo ./target/debug/tcp-traffic-scan -- "${CONVERTED_ARGS[@]}"
