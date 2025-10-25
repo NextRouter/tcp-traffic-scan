@@ -579,12 +579,7 @@ fn bind_socket_to_interface(socket: &Socket, interface: &str) -> io::Result<()> 
         // Provide more detailed error message
         Err(io::Error::new(
             err.kind(),
-            format!(
-                "Failed to bind to interface '{}': {} (errno: {})",
-                interface,
-                err,
-                unsafe { *libc::__error() }
-            ),
+            format!("Failed to bind to interface '{}': {}", interface, err),
         ))
     }
 }
