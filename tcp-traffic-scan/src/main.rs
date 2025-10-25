@@ -22,9 +22,19 @@ use tokio::runtime::Runtime;
 lazy_static! {
     static ref REGISTRY: Registry = Registry::new();
     static ref BANDWIDTH_GAUGE: GaugeVec = {
-        let opts = Opts::new("tcp_bandwidth_mbps", "TCP bandwidth estimation in Mbps")
+        let opts = Opts::new("tcp_bandwidth_bps", "TCP bandwidth estimation in bps")
             .namespace("tcp_traffic_scan");
         let gauge = GaugeVec::new(opts, &["interface", "server_ip"]).unwrap();
+        REGISTRY.register(Box::new(gauge.clone())).unwrap();
+        gauge
+    };
+    static ref BANDWIDTH_AVG_GAUGE: GaugeVec = {
+        let opts = Opts::new(
+            "tcp_bandwidth_avg_bps",
+            "TCP bandwidth average per interface in bps",
+        )
+        .namespace("tcp_traffic_scan");
+        let gauge = GaugeVec::new(opts, &["interface"]).unwrap();
         REGISTRY.register(Box::new(gauge.clone())).unwrap();
         gauge
     };
@@ -188,6 +198,8 @@ fn main() {
     while running.load(Ordering::SeqCst) {
         for interface in &args.interface {
             let mut results = Vec::new();
+            let mut bandwidth_sum = 0.0;
+            let mut bandwidth_count = 0;
 
             for server_str in &args.server {
                 match resolve_server_address(server_str) {
@@ -198,18 +210,17 @@ fn main() {
                             } else {
                                 0.0
                             };
-                            let throughput_mbps = throughput_bps / 1_000_000.0;
 
-                            // Update Prometheus metric
+                            // Update Prometheus metric (in bps)
                             BANDWIDTH_GAUGE
                                 .with_label_values(&[interface, &server_addr.ip().to_string()])
-                                .set(throughput_mbps);
+                                .set(throughput_bps);
 
-                            results.push(format!(
-                                "{}:{:.0}Mbps",
-                                server_addr.ip(),
-                                throughput_mbps
-                            ));
+                            // Accumulate for average
+                            bandwidth_sum += throughput_bps;
+                            bandwidth_count += 1;
+
+                            results.push(format!("{}:{:.0}bps", server_addr.ip(), throughput_bps));
                         }
                         Err(e) => {
                             eprintln!(
@@ -229,6 +240,16 @@ fn main() {
 
                 // Small delay between servers to stagger measurements
                 std::thread::sleep(Duration::from_millis(100));
+            }
+
+            // Calculate and update average bandwidth for this interface
+            if bandwidth_count > 0 {
+                let avg_bandwidth = bandwidth_sum / bandwidth_count as f64;
+                BANDWIDTH_AVG_GAUGE
+                    .with_label_values(&[interface])
+                    .set(avg_bandwidth);
+
+                results.push(format!("avg:{:.0}bps", avg_bandwidth));
             }
 
             // Print interface results in bar format

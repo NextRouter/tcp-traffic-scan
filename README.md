@@ -49,11 +49,18 @@ http://localhost:59121/metrics
 
 ### メトリクス形式
 
+全てのメトリクスは **bps（bits per second）** 単位で出力されます。
+
 ```
-tcp_traffic_scan_tcp_bandwidth_mbps{interface="eth0",server_ip="1.1.1.1"} 150.5
-tcp_traffic_scan_tcp_bandwidth_mbps{interface="eth0",server_ip="8.8.8.8"} 200.3
-tcp_traffic_scan_tcp_bandwidth_mbps{interface="eth1",server_ip="1.1.1.1"} 180.2
-tcp_traffic_scan_tcp_bandwidth_mbps{interface="eth1",server_ip="8.8.8.8"} 220.7
+# 各サーバーIPごとの帯域幅
+tcp_traffic_scan_tcp_bandwidth_bps{interface="eth0",server_ip="1.1.1.1"} 150500000
+tcp_traffic_scan_tcp_bandwidth_bps{interface="eth0",server_ip="8.8.8.8"} 200300000
+tcp_traffic_scan_tcp_bandwidth_bps{interface="eth1",server_ip="1.1.1.1"} 180200000
+tcp_traffic_scan_tcp_bandwidth_bps{interface="eth1",server_ip="8.8.8.8"} 220700000
+
+# 各インターフェースごとの平均帯域幅
+tcp_traffic_scan_tcp_bandwidth_avg_bps{interface="eth0"} 175400000
+tcp_traffic_scan_tcp_bandwidth_avg_bps{interface="eth1"} 200450000
 ```
 
 ### Prometheus 設定例
@@ -110,10 +117,10 @@ Prometheus metrics available at http://localhost:59121/metrics
 Correction factor API available at http://localhost:32600/tcpflow?value=<factor>
 Starting measurements...
 ==================================
-eth0: |1.1.1.1:150Mbps|8.8.8.8:200Mbps|
-eth1: |1.1.1.1:180Mbps|8.8.8.8:220Mbps|
-eth0: |1.1.1.1:152Mbps|8.8.8.8:198Mbps|
-eth1: |1.1.1.1:179Mbps|8.8.8.8:222Mbps|
+eth0: |1.1.1.1:150500000bps|8.8.8.8:200300000bps|avg:175400000bps|
+eth1: |1.1.1.1:180200000bps|8.8.8.8:220700000bps|avg:200450000bps|
+eth0: |1.1.1.1:152000000bps|8.8.8.8:198000000bps|avg:175000000bps|
+eth1: |1.1.1.1:179000000bps|8.8.8.8:222000000bps|avg:200500000bps|
 ...
 ```
 
@@ -122,10 +129,17 @@ eth1: |1.1.1.1:179Mbps|8.8.8.8:222Mbps|
 ```bash
 # メトリクスを確認
 $ curl http://localhost:59121/metrics
-# HELP tcp_traffic_scan_tcp_bandwidth_mbps TCP bandwidth estimation in Mbps
-# TYPE tcp_traffic_scan_tcp_bandwidth_mbps gauge
-tcp_traffic_scan_tcp_bandwidth_mbps{interface="eth0",server_ip="1.1.1.1"} 150.5
-tcp_traffic_scan_tcp_bandwidth_mbps{interface="eth0",server_ip="8.8.8.8"} 200.3
+# HELP tcp_traffic_scan_tcp_bandwidth_bps TCP bandwidth estimation in bps
+# TYPE tcp_traffic_scan_tcp_bandwidth_bps gauge
+tcp_traffic_scan_tcp_bandwidth_bps{interface="eth0",server_ip="1.1.1.1"} 150500000
+tcp_traffic_scan_tcp_bandwidth_bps{interface="eth0",server_ip="8.8.8.8"} 200300000
+tcp_traffic_scan_tcp_bandwidth_bps{interface="eth1",server_ip="1.1.1.1"} 180200000
+tcp_traffic_scan_tcp_bandwidth_bps{interface="eth1",server_ip="8.8.8.8"} 220700000
+
+# HELP tcp_traffic_scan_tcp_bandwidth_avg_bps TCP bandwidth average per interface in bps
+# TYPE tcp_traffic_scan_tcp_bandwidth_avg_bps gauge
+tcp_traffic_scan_tcp_bandwidth_avg_bps{interface="eth0"} 175400000
+tcp_traffic_scan_tcp_bandwidth_avg_bps{interface="eth1"} 200450000
 ...
 
 # 補正値を10倍に設定
@@ -134,8 +148,10 @@ Correction factor set to: 10
 
 # 補正後のメトリクスを確認（全ての値が10倍になる）
 $ curl http://localhost:59121/metrics
-tcp_traffic_scan_tcp_bandwidth_mbps{interface="eth0",server_ip="1.1.1.1"} 1505.0
-tcp_traffic_scan_tcp_bandwidth_mbps{interface="eth0",server_ip="8.8.8.8"} 2003.0
+tcp_traffic_scan_tcp_bandwidth_bps{interface="eth0",server_ip="1.1.1.1"} 1505000000
+tcp_traffic_scan_tcp_bandwidth_bps{interface="eth0",server_ip="8.8.8.8"} 2003000000
+tcp_traffic_scan_tcp_bandwidth_avg_bps{interface="eth0"} 1754000000
+tcp_traffic_scan_tcp_bandwidth_avg_bps{interface="eth1"} 2004500000
 ...
 ```
 
