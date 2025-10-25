@@ -4,6 +4,7 @@ use lazy_static::lazy_static;
 use libc;
 use prometheus::{Encoder, GaugeVec, Opts, Registry, TextEncoder};
 use socket2::{Domain, Socket, Type};
+use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::io;
@@ -14,10 +15,11 @@ use std::os::unix::io::AsRawFd;
 use std::sync::Once;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
+use tokio::sync::Mutex;
 
 lazy_static! {
     static ref REGISTRY: Registry = Registry::new();
@@ -38,12 +40,23 @@ lazy_static! {
         REGISTRY.register(Box::new(gauge.clone())).unwrap();
         gauge
     };
-    static ref CORRECTION_FACTOR: Arc<Mutex<f64>> = Arc::new(Mutex::new(1.0));
+    // Map from interface name to correction factor
+    static ref CORRECTION_FACTORS: Arc<Mutex<HashMap<String, f64>>> = Arc::new(Mutex::new(HashMap::new()));
+    // Map from NIC alias (wan0, wan1, lan) to actual interface name (eth0, eth1, eth2)
+    static ref NIC_MAPPING: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct StatusResponse {
+    config: HashMap<String, String>,
+    #[allow(dead_code)]
+    mappings: Option<HashMap<String, String>>,
 }
 
 #[derive(serde::Deserialize)]
 struct CorrectionQuery {
     value: Option<f64>,
+    nic: Option<String>,
 }
 
 // Prometheus metrics server on port 59121
@@ -68,19 +81,30 @@ async fn metrics_handler() -> impl IntoResponse {
     let mut buffer = Vec::new();
     let encoder = TextEncoder::new();
 
-    // Get correction factor
-    let correction = *CORRECTION_FACTOR.lock().unwrap();
+    // Get correction factors
+    let correction_factors = CORRECTION_FACTORS.lock().await.clone();
 
     // Gather metrics
     let metric_families = REGISTRY.gather();
 
-    // Apply correction factor to all gauge values
+    // Apply correction factor to all gauge values based on interface
     let corrected_families: Vec<_> = metric_families
         .iter()
         .map(|mf| {
             let mut corrected_mf = mf.clone();
             for metric in corrected_mf.mut_metric() {
                 if metric.has_gauge() {
+                    // Find the interface label
+                    let interface = metric
+                        .get_label()
+                        .iter()
+                        .find(|label| label.get_name() == "interface")
+                        .map(|label| label.get_value())
+                        .unwrap_or("");
+
+                    // Get correction factor for this interface (default to 1.0)
+                    let correction = correction_factors.get(interface).copied().unwrap_or(1.0);
+
                     let original_value = metric.get_gauge().get_value();
                     metric.mut_gauge().set_value(original_value * correction);
                 }
@@ -112,27 +136,143 @@ async fn start_correction_server(running: Arc<AtomicBool>) {
         .unwrap();
 }
 
-async fn correction_handler(Query(params): Query<CorrectionQuery>) -> impl IntoResponse {
+#[axum::debug_handler]
+async fn correction_handler(Query(params): Query<CorrectionQuery>) -> (StatusCode, String) {
     if let Some(value) = params.value {
-        if value > 0.0 {
-            *CORRECTION_FACTOR.lock().unwrap() = value;
-            (
-                StatusCode::OK,
-                format!("Correction factor set to: {}\n", value),
-            )
-        } else {
-            (
+        if value <= 0.0 {
+            return (
                 StatusCode::BAD_REQUEST,
                 "Value must be greater than 0\n".to_string(),
+            );
+        }
+
+        if let Some(nic_alias) = params.nic {
+            // Resolve NIC alias to actual interface name
+            let actual_interface = {
+                let nic_mapping = NIC_MAPPING.lock().await;
+                nic_mapping.get(&nic_alias).cloned()
+            };
+
+            match actual_interface {
+                Some(interface) => {
+                    // Set correction factor for specific interface
+                    CORRECTION_FACTORS
+                        .lock()
+                        .await
+                        .insert(interface.clone(), value);
+                    (
+                        StatusCode::OK,
+                        format!(
+                            "Correction factor for {} ({}) set to: {}\n",
+                            nic_alias, interface, value
+                        ),
+                    )
+                }
+                None => {
+                    // Try to fetch NIC mapping from status API
+                    if let Err(e) = fetch_nic_mapping().await {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            format!(
+                                "NIC alias '{}' not found. Failed to fetch mapping: {}\n",
+                                nic_alias, e
+                            ),
+                        );
+                    }
+
+                    // Try again after fetching
+                    let actual_interface = {
+                        let nic_mapping = NIC_MAPPING.lock().await;
+                        nic_mapping.get(&nic_alias).cloned()
+                    };
+
+                    match actual_interface {
+                        Some(interface) => {
+                            CORRECTION_FACTORS
+                                .lock()
+                                .await
+                                .insert(interface.clone(), value);
+                            (
+                                StatusCode::OK,
+                                format!(
+                                    "Correction factor for {} ({}) set to: {}\n",
+                                    nic_alias, interface, value
+                                ),
+                            )
+                        }
+                        None => (
+                            StatusCode::NOT_FOUND,
+                            format!("NIC alias '{}' not found in mapping\n", nic_alias),
+                        ),
+                    }
+                }
+            }
+        } else {
+            // Set global correction factor for all interfaces
+            let interfaces: Vec<String> = {
+                let factors = CORRECTION_FACTORS.lock().await;
+                factors.keys().cloned().collect()
+            };
+
+            if interfaces.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "No interfaces configured. Specify nic parameter.\n".to_string(),
+                );
+            }
+
+            let mut factors_guard = CORRECTION_FACTORS.lock().await;
+            for interface in &interfaces {
+                factors_guard.insert(interface.clone(), value);
+            }
+            drop(factors_guard);
+
+            (
+                StatusCode::OK,
+                format!("Correction factor for all interfaces set to: {}\n", value),
             )
         }
     } else {
-        let current = *CORRECTION_FACTOR.lock().unwrap();
-        (
-            StatusCode::OK,
-            format!("Current correction factor: {}\n", current),
-        )
+        // Show current correction factors
+        let factors = CORRECTION_FACTORS.lock().await.clone();
+        if factors.is_empty() {
+            (
+                StatusCode::OK,
+                "No correction factors set (all default to 1.0)\n".to_string(),
+            )
+        } else {
+            let mut response = String::from("Current correction factors:\n");
+            for (interface, factor) in factors.iter() {
+                response.push_str(&format!("  {}: {}\n", interface, factor));
+            }
+            (StatusCode::OK, response)
+        }
     }
+}
+
+// Fetch NIC mapping from localhost:32599/status
+async fn fetch_nic_mapping() -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get("http://localhost:32599/status")
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch status: {}", e))?;
+
+    let status: StatusResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse status response: {}", e))?;
+
+    // Update NIC mapping
+    let mut nic_mapping = NIC_MAPPING.lock().await;
+    nic_mapping.clear();
+    for (alias, interface) in status.config {
+        nic_mapping.insert(alias, interface);
+    }
+
+    Ok(())
 }
 
 #[derive(Parser, Debug)]
@@ -172,6 +312,33 @@ fn main() {
     // Create tokio runtime for async servers
     let rt = Runtime::new().unwrap();
 
+    // Initialize correction factors for all interfaces (default to 1.0)
+    rt.block_on(async {
+        let mut factors = CORRECTION_FACTORS.lock().await;
+        for interface in &args.interface {
+            factors.insert(interface.clone(), 1.0);
+        }
+    });
+
+    // Try to fetch NIC mapping on startup
+    rt.block_on(async {
+        if let Err(e) = fetch_nic_mapping().await {
+            eprintln!(
+                "Warning: Could not fetch NIC mapping from localhost:32599/status: {}",
+                e
+            );
+            eprintln!("You can still use interface names directly.");
+        } else {
+            let mapping = NIC_MAPPING.lock().await;
+            if !mapping.is_empty() {
+                println!("NIC mapping loaded:");
+                for (alias, interface) in mapping.iter() {
+                    println!("  {} -> {}", alias, interface);
+                }
+            }
+        }
+    });
+
     // Start Prometheus metrics server (port 59121)
     {
         let running = running.clone();
@@ -189,7 +356,7 @@ fn main() {
     }
 
     println!("Prometheus metrics available at http://localhost:59121/metrics");
-    println!("Correction factor API available at http://localhost:32600/tcpflow?value=<factor>");
+    println!("Correction factor API available at http://localhost:32600/tcpflow?value=<factor>&nic=<interface>");
     println!("Starting measurements...");
     println!("==================================");
 

@@ -81,19 +81,47 @@ scrape_configs:
 
 ## HTTP 補正値 API
 
-測定値に補正係数を適用できます。全てのメトリクス値が指定された係数で乗算されます。
+測定値に補正係数を適用できます。**インターフェースごとに個別の補正値を設定可能**で、全てのメトリクス値が指定された係数で乗算されます。
 
-### 補正値を設定
+### NIC マッピングの自動取得
+
+プログラム起動時に `http://localhost:32599/status` から自動的に NIC マッピングを取得します。
+
+`http://localhost:32599/status` のレスポンス例:
+
+```json
+{
+  "config": {
+    "lan": "eth2",
+    "wan0": "eth0",
+    "wan1": "eth1"
+  },
+  "mappings": {
+    "10.40.0.3": "wan1"
+  }
+}
+```
+
+この情報を使って、`wan0`や`wan1`などのエイリアスで補正値を設定できます。
+
+### 補正値を設定（インターフェース指定）
 
 ```bash
-# 測定値を10倍にする
+# wan0（eth0）の測定値を10倍にする
+curl "http://localhost:32600/tcpflow?value=10&nic=wan0"
+
+# wan1（eth1）の測定値を0.5倍にする（半分）
+curl "http://localhost:32600/tcpflow?value=0.5&nic=wan1"
+
+# 実際のインターフェース名でも指定可能
+curl "http://localhost:32600/tcpflow?value=2&nic=eth0"
+```
+
+### 補正値を設定（全インターフェース）
+
+```bash
+# 全てのインターフェースの測定値を10倍にする
 curl "http://localhost:32600/tcpflow?value=10"
-
-# 測定値を0.5倍にする（半分）
-curl "http://localhost:32600/tcpflow?value=0.5"
-
-# 測定値を2倍にする
-curl "http://localhost:32600/tcpflow?value=2"
 ```
 
 ### 現在の補正値を確認
@@ -105,7 +133,9 @@ curl "http://localhost:32600/tcpflow"
 レスポンス例:
 
 ```
-Current correction factor: 10
+Current correction factors:
+  eth0: 10
+  eth1: 0.5
 ```
 
 ## 実行例
@@ -113,8 +143,12 @@ Current correction factor: 10
 ```bash
 $ cargo run -- -i eth0 -i eth1 -s 1.1.1.1 -s 8.8.8.8
 
+NIC mapping loaded:
+  lan -> eth2
+  wan0 -> eth0
+  wan1 -> eth1
 Prometheus metrics available at http://localhost:59121/metrics
-Correction factor API available at http://localhost:32600/tcpflow?value=<factor>
+Correction factor API available at http://localhost:32600/tcpflow?value=<factor>&nic=<interface>
 Starting measurements...
 ==================================
 eth0: |1.1.1.1:150500000bps|8.8.8.8:200300000bps|avg:175400000bps|
@@ -142,16 +176,18 @@ tcp_traffic_scan_tcp_bandwidth_avg_bps{interface="eth0"} 175400000
 tcp_traffic_scan_tcp_bandwidth_avg_bps{interface="eth1"} 200450000
 ...
 
-# 補正値を10倍に設定
-$ curl "http://localhost:32600/tcpflow?value=10"
-Correction factor set to: 10
+# wan0（eth0）の補正値を10倍に設定
+$ curl "http://localhost:32600/tcpflow?value=10&nic=wan0"
+Correction factor for wan0 (eth0) set to: 10
 
-# 補正後のメトリクスを確認（全ての値が10倍になる）
+# 補正後のメトリクスを確認（eth0の値だけが10倍になる）
 $ curl http://localhost:59121/metrics
 tcp_traffic_scan_tcp_bandwidth_bps{interface="eth0",server_ip="1.1.1.1"} 1505000000
 tcp_traffic_scan_tcp_bandwidth_bps{interface="eth0",server_ip="8.8.8.8"} 2003000000
+tcp_traffic_scan_tcp_bandwidth_bps{interface="eth1",server_ip="1.1.1.1"} 180200000
+tcp_traffic_scan_tcp_bandwidth_bps{interface="eth1",server_ip="8.8.8.8"} 220700000
 tcp_traffic_scan_tcp_bandwidth_avg_bps{interface="eth0"} 1754000000
-tcp_traffic_scan_tcp_bandwidth_avg_bps{interface="eth1"} 2004500000
+tcp_traffic_scan_tcp_bandwidth_avg_bps{interface="eth1"} 200450000
 ...
 ```
 
