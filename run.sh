@@ -15,4 +15,5 @@ done
 cd tcp-traffic-scan
 
 # Run the application
-cargo run -- "${CONVERTED_ARGS[@]}"
+cargo build
+./target/debug/tcp-traffic-scan -- "${CONVERTED_ARGS[@]}"
