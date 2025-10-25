@@ -260,8 +260,24 @@ fn main() {
                 match resolve_server_address(server_str) {
                     Ok(server_addr) => match measure_throughput(interface, server_addr) {
                         Ok((rtt, window_size)) => {
-                            let throughput_bps = if rtt.as_secs_f64() > 0.0 {
-                                (window_size as f64 * 8.0) / rtt.as_secs_f64()
+                            // Calculate bandwidth using improved formula
+                            // BDP (Bandwidth-Delay Product) = Bandwidth × RTT
+                            // Therefore: Bandwidth = Window Size / RTT
+                            //
+                            // We use a more conservative approach:
+                            // - Convert window size to bits (multiply by 8)
+                            // - Divide by RTT in seconds
+                            // - Apply a coefficient to account for TCP overhead and protocol efficiency
+                            let rtt_secs = rtt.as_secs_f64();
+                            let throughput_bps = if rtt_secs > 0.0 {
+                                // TCP typically achieves 70-90% efficiency due to:
+                                // - ACK overhead
+                                // - Retransmissions
+                                // - Slow start and congestion control
+                                // We use 0.75 as a reasonable efficiency factor
+                                let raw_bandwidth = (window_size as f64 * 8.0) / rtt_secs;
+                                let tcp_efficiency = 0.75;
+                                raw_bandwidth * tcp_efficiency
                             } else {
                                 0.0
                             };
@@ -275,7 +291,14 @@ fn main() {
                             bandwidth_sum += throughput_bps;
                             bandwidth_count += 1;
 
-                            results.push(format!("{}:{:.0}bps", server_addr.ip(), throughput_bps));
+                            // Format with RTT information for debugging
+                            results.push(format!(
+                                "{}:{:.0}bps(rtt:{:.1}ms,win:{})",
+                                server_addr.ip(),
+                                throughput_bps,
+                                rtt.as_secs_f64() * 1000.0,
+                                window_size
+                            ));
                         }
                         Err(e) => {
                             eprintln!(
@@ -353,6 +376,10 @@ fn measure_throughput(interface: &str, addr: SocketAddr) -> io::Result<(Duration
 
     let socket = Socket::new(domain, Type::STREAM, None)?;
 
+    // Set socket options before connecting for better control
+    socket.set_nodelay(true)?; // Disable Nagle's algorithm for faster response
+    socket.set_keepalive(true)?; // Enable keepalive to maintain connection state
+
     // Bind the socket to the specified interface (Linux-only)
     if let Err(e) = bind_socket_to_interface(&socket, interface) {
         eprintln!(
@@ -362,14 +389,25 @@ fn measure_throughput(interface: &str, addr: SocketAddr) -> io::Result<(Duration
         // Continue without binding, the OS will choose the interface.
     }
 
+    // Measure connection establishment time (includes SYN, SYN-ACK, ACK)
     let start = Instant::now();
     socket.connect_timeout(&addr.into(), Duration::from_secs(5))?;
-    let rtt = start.elapsed();
+    let connect_time = start.elapsed();
+
+    // RTT is approximately half of the connection time (SYN -> SYN-ACK)
+    // This is more accurate than using the full connect_timeout duration
+    let estimated_rtt = connect_time / 2;
 
     let fd = socket.as_raw_fd();
-    // On most platforms (including macOS and Linux), SO_RCVBUF is an int
-    // https://man7.org/linux/man-pages/man7/socket.7.html
-    let mut window_size: libc::c_int = 0;
+
+    // Wait a bit to let TCP connection fully establish and negotiate window
+    std::thread::sleep(Duration::from_millis(10));
+
+    // Get TCP_INFO for more accurate RTT measurement
+    let actual_rtt = get_tcp_info_rtt(fd).unwrap_or(estimated_rtt);
+
+    // Get receive buffer size (SO_RCVBUF)
+    let mut rcv_buf: libc::c_int = 0;
     let mut optlen = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
 
     let result = unsafe {
@@ -377,7 +415,7 @@ fn measure_throughput(interface: &str, addr: SocketAddr) -> io::Result<(Duration
             fd,
             libc::SOL_SOCKET,
             libc::SO_RCVBUF,
-            &mut window_size as *mut _ as *mut libc::c_void,
+            &mut rcv_buf as *mut _ as *mut libc::c_void,
             &mut optlen,
         )
     };
@@ -386,15 +424,103 @@ fn measure_throughput(interface: &str, addr: SocketAddr) -> io::Result<(Duration
         return Err(io::Error::last_os_error());
     }
 
-    // Linux doubles the returned value for internal bookkeeping; other OSes generally do not.
-    // Apply halving only on Linux to report the actual window size.
+    // Linux doubles the returned value for internal bookkeeping
     #[cfg(target_os = "linux")]
-    let actual_window_size = (window_size / 2) as u32;
+    let actual_rcv_buf = (rcv_buf / 2) as u32;
 
     #[cfg(not(target_os = "linux"))]
-    let actual_window_size = window_size as u32;
+    let actual_rcv_buf = rcv_buf as u32;
 
-    Ok((rtt, actual_window_size))
+    // Get send buffer size (SO_SNDBUF) as well for better estimation
+    let mut snd_buf: libc::c_int = 0;
+    let result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &mut snd_buf as *mut _ as *mut libc::c_void,
+            &mut optlen,
+        )
+    };
+
+    let actual_snd_buf = if result == 0 {
+        #[cfg(target_os = "linux")]
+        let buf = (snd_buf / 2) as u32;
+        #[cfg(not(target_os = "linux"))]
+        let buf = snd_buf as u32;
+        buf
+    } else {
+        actual_rcv_buf // Fallback to receive buffer
+    };
+
+    // Use the minimum of send and receive buffer as the effective window
+    // This better represents the actual TCP window limitation
+    let effective_window = std::cmp::min(actual_rcv_buf, actual_snd_buf);
+
+    Ok((actual_rtt, effective_window))
+}
+
+#[cfg(target_os = "linux")]
+fn get_tcp_info_rtt(fd: i32) -> Option<Duration> {
+    // Use TCP_INFO to get accurate RTT measurement on Linux
+    #[repr(C)]
+    struct TcpInfo {
+        tcpi_state: u8,
+        tcpi_ca_state: u8,
+        tcpi_retransmits: u8,
+        tcpi_probes: u8,
+        tcpi_backoff: u8,
+        tcpi_options: u8,
+        tcpi_snd_wscale_rcv_wscale: u8,
+        tcpi_delivery_rate_app_limited_fastopen_client_fail: u8,
+        tcpi_rto: u32,
+        tcpi_ato: u32,
+        tcpi_snd_mss: u32,
+        tcpi_rcv_mss: u32,
+        tcpi_unacked: u32,
+        tcpi_sacked: u32,
+        tcpi_lost: u32,
+        tcpi_retrans: u32,
+        tcpi_fackets: u32,
+        tcpi_last_data_sent: u32,
+        tcpi_last_ack_sent: u32,
+        tcpi_last_data_recv: u32,
+        tcpi_last_ack_recv: u32,
+        tcpi_pmtu: u32,
+        tcpi_rcv_ssthresh: u32,
+        tcpi_rtt: u32,    // Smoothed RTT in microseconds
+        tcpi_rttvar: u32, // RTT variance in microseconds
+        tcpi_snd_ssthresh: u32,
+        tcpi_snd_cwnd: u32,
+        tcpi_advmss: u32,
+        tcpi_reordering: u32,
+        // ... more fields exist but we only need RTT
+    }
+
+    let mut info: TcpInfo = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<TcpInfo>() as libc::socklen_t;
+
+    let result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_INFO,
+            &mut info as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+
+    if result == 0 && info.tcpi_rtt > 0 {
+        Some(Duration::from_micros(info.tcpi_rtt as u64))
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn get_tcp_info_rtt(_fd: i32) -> Option<Duration> {
+    // TCP_INFO is Linux-specific; return None on other platforms
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -416,9 +542,50 @@ fn bind_socket_to_interface(socket: &Socket, interface: &str) -> io::Result<()> 
     };
 
     if ret == 0 {
+        // Verify binding was successful by getting the bound interface
+        let mut buf = vec![0u8; libc::IFNAMSIZ];
+        let mut len = buf.len() as libc::socklen_t;
+
+        let verify_ret = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_BINDTODEVICE,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                &mut len,
+            )
+        };
+
+        if verify_ret == 0 {
+            let bound_if = CString::new(&buf[..len as usize])
+                .ok()
+                .and_then(|s| s.into_string().ok())
+                .unwrap_or_default();
+
+            if bound_if.trim_matches('\0') != interface {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!(
+                        "Interface binding verification failed: expected {}, got {}",
+                        interface, bound_if
+                    ),
+                ));
+            }
+        }
+
         Ok(())
     } else {
-        Err(io::Error::last_os_error())
+        let err = io::Error::last_os_error();
+        // Provide more detailed error message
+        Err(io::Error::new(
+            err.kind(),
+            format!(
+                "Failed to bind to interface '{}': {} (errno: {})",
+                interface,
+                err,
+                unsafe { *libc::__error() }
+            ),
+        ))
     }
 }
 
