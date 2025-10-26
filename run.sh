@@ -21,11 +21,12 @@ cargo build
 echo "Creating systemd service..."
 SERVICE_FILE="/etc/systemd/system/tcp-traffic-scan.service"
 CURRENT_DIR=$(pwd)
-BINARY_PATH="$CURRENT_DIR/tcp-traffic-scan/target/debug/tcp-traffic-scan ${CONVERTED_ARGS[@]}"
+BINARY_FILE="$CURRENT_DIR/target/debug/tcp-traffic-scan"
+BINARY_PATH="$BINARY_FILE ${CONVERTED_ARGS[@]}"
 
 # Check if binary exists
-if [ ! -f "$BINARY_PATH" ]; then
-    echo "Error: Binary not found at $BINARY_PATH"
+if [ ! -f "$BINARY_FILE" ]; then
+    echo "Error: Binary not found at $BINARY_FILE"
     exit 1
 fi
 
