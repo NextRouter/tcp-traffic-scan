@@ -20,7 +20,7 @@ cargo build
 # Create systemd service file
 echo "Creating systemd service..."
 SERVICE_FILE="/etc/systemd/system/tcp-traffic-scan.service"
-CURRENT_DIR=$(pwd)
+CURRENT_DIR=$(pwd)/tcp-traffic-scan
 BINARY_PATH="$CURRENT_DIR/target/release/tcp-traffic-scan ${CONVERTED_ARGS[@]}"
 
 # Check if binary exists
