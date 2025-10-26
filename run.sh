@@ -30,7 +30,7 @@ if [ ! -f "$BINARY_FILE" ]; then
     exit 1
 fi
 
-tee $SERVICE_FILE > /dev/null << EOF
+sudo tee $SERVICE_FILE > /dev/null << EOF
 [Unit]
 Description=TCP Traffic Scanner
 After=network.target
