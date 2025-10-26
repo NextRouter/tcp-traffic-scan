@@ -17,17 +17,19 @@ cd tcp-traffic-scan
 # Run the application
 cargo build
 
-# Function to create systemd service
-create_systemd_service() {
-    local service_name="tcp-traffic-scan"
-    local service_file="/etc/systemd/system/${service_name}.service"
-    local current_dir=$(pwd)
-    
-    # Get arguments after --install
-    shift # Remove --install
-    local service_args="$*"
-    
-    sudo tee "$service_file" > /dev/null <<EOF
+# Create systemd service file
+echo "Creating systemd service..."
+SERVICE_FILE="/etc/systemd/system/tcp-traffic-scan.service"
+CURRENT_DIR=$(pwd)
+BINARY_PATH="$CURRENT_DIR/target/release/tcp-traffic-scan ${CONVERTED_ARGS[@]}"
+
+# Check if binary exists
+if [ ! -f "$BINARY_PATH" ]; then
+    echo "Error: Binary not found at $BINARY_PATH"
+    exit 1
+fi
+
+tee $SERVICE_FILE > /dev/null << EOF
 [Unit]
 Description=TCP Traffic Scanner
 After=network.target
@@ -35,8 +37,8 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=${current_dir}/tcp-traffic-scan
-ExecStart=${current_dir}/tcp-traffic-scan/target/debug/tcp-traffic-scan ${service_args}
+ExecStart=$BINARY_PATH
+WorkingDirectory=$CURRENT_DIR
 Restart=always
 RestartSec=10
 
@@ -44,15 +46,9 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-    sudo systemctl daemon-reload
-    sudo systemctl enable "$service_name"
-    echo "Service created and enabled: $service_name with args: $service_args"
-}
+# Reload systemd and enable the service
+sudo systemctl daemon-reload
+sudo systemctl enable tcp-traffic-scan.service
 
-# Register with systemctl if --install flag is provided
-if [[ "$1" == "--install" ]]; then
-    create_systemd_service "$@"
-    exit 0
-fi
-
-sudo ./target/debug/tcp-traffic-scan "${CONVERTED_ARGS[@]}"
+echo "Service created and enabled. You can start it with:"
+echo "sudo systemctl start tcp-traffic-scan.service"
