@@ -245,6 +245,8 @@ fn main() {
 
     println!("Prometheus metrics available at http://localhost:59121/metrics");
     println!("Correction factor API available at http://localhost:32600/tcpflow?value=<factor>");
+    println!("Interfaces: {:?}", args.interface);
+    println!("Servers: {:?}", args.server);
     println!("Starting measurements...");
     println!("==================================");
 
@@ -286,6 +288,13 @@ fn main() {
                             BANDWIDTH_GAUGE
                                 .with_label_values(&[interface, &server_addr.ip().to_string()])
                                 .set(throughput_bps);
+
+                            eprintln!(
+                                "DEBUG: Set metric for interface={}, server_ip={}, throughput_bps={}",
+                                interface,
+                                server_addr.ip(),
+                                throughput_bps
+                            );
 
                             // Accumulate for average
                             bandwidth_sum += throughput_bps;
