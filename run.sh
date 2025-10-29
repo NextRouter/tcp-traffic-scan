@@ -1,16 +1,6 @@
 #!/bin/bash
 set -e
 
-# Convert arguments like -s1 1.1.1.1 to -s 1.1.1.1
-CONVERTED_ARGS=()
-for arg in "$@"; do
-    if [[ $arg == -s[0-9] ]]; then
-        CONVERTED_ARGS+=("-s")
-    else
-        CONVERTED_ARGS+=("$arg")
-    fi
-done
-
 # Change to the project directory
 cd tcp-traffic-scan
 
@@ -22,7 +12,7 @@ echo "Creating systemd service..."
 SERVICE_FILE="/etc/systemd/system/tcp-traffic-scan.service"
 CURRENT_DIR=$(pwd)
 BINARY_FILE="$CURRENT_DIR/target/debug/tcp-traffic-scan"
-BINARY_PATH="$BINARY_FILE ${CONVERTED_ARGS[@]}"
+BINARY_PATH="$BINARY_FILE -i eth0 -i eth1 -s 1.1.1.1 -s 1.0.0.1 -s 8.8.8.8 -s 8.8.4.4"
 
 # Check if binary exists
 if [ ! -f "$BINARY_FILE" ]; then
